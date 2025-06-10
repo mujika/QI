@@ -169,10 +169,19 @@ struct ContentView: View {
                                 RecordingRow(
                                     recording: recording,
                                     isPlaying: audioManager.currentPlayingId == recording.id,
-                                    onPlay: { audioManager.playRecording(recording) },
-                                    onStop: { audioManager.stopPlayback() },
-                                    onDelete: { deleteRecording(recording) }
+                                    onTap: {
+                                        if audioManager.currentPlayingId == recording.id {
+                                            audioManager.stopPlayback()
+                                        } else {
+                                            audioManager.playRecording(recording)
+                                        }
+                                    }
                                 )
+                            }
+                            .onDelete { indexSet in
+                                for index in indexSet {
+                                    deleteRecording(recordings[index])
+                                }
                             }
                         }
                         .listStyle(PlainListStyle())
@@ -297,9 +306,7 @@ struct ContentView: View {
 struct RecordingRow: View {
     let recording: RecordingFile
     let isPlaying: Bool
-    let onPlay: () -> Void
-    let onStop: () -> Void
-    let onDelete: () -> Void
+    let onTap: () -> Void
     
     private var formattedDate: String {
         let formatter = DateFormatter()
@@ -337,21 +344,16 @@ struct RecordingRow: View {
             
             Spacer()
             
-            HStack(spacing: 10) {
-                Button(action: isPlaying ? onStop : onPlay) {
-                    Image(systemName: isPlaying ? "stop.fill" : "play.fill")
-                        .font(.title2)
-                        .foregroundColor(.blue)
-                }
-                
-                Button(action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.title3)
-                        .foregroundColor(.red)
-                }
-            }
+            // 再生状態を示すアイコン
+            Image(systemName: isPlaying ? "speaker.wave.2.fill" : "play.circle")
+                .font(.title2)
+                .foregroundColor(isPlaying ? .green : .blue)
         }
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onTap()
+        }
     }
 }
 
