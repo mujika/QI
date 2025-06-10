@@ -25,6 +25,7 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var currentPlayingId: UUID?
     @Published var isMonitoring = false
     @Published var inputLevel: Float = 0.0
+    @Published var isRecording = false
     
     private var audioPlayer: AVAudioPlayer?
     private var recordingSession: AVAudioSession!
@@ -32,6 +33,7 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private var inputNode: AVAudioInputNode!
     private var playerNode: AVAudioPlayerNode!
     private var levelTimer: Timer?
+    private var audioRecorder: AVAudioRecorder?
     
     override init() {
         super.init()
@@ -98,22 +100,23 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     
     func startMonitoring() {
-        guard !audioEngine.isRunning else { 
-            print("AudioEngine already running")
-            return 
-        }
-        
         do {
-            audioEngine.stop()
+            if audioEngine.isRunning {
+                audioEngine.stop()
+            }
             audioEngine.reset()
             
             try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
             try recordingSession.setActive(true)
             
             let inputFormat = inputNode.outputFormat(forBus: 0)
+            let outputFormat = audioEngine.mainMixerNode.outputFormat(forBus: 0)
+            
             print("Input format: \(inputFormat)")
+            print("Output format: \(outputFormat)")
             
             if inputNode.numberOfInputs > 0 {
+                // レベルメーター用のタップを設置
                 inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] (buffer, time) in
                     guard let self = self else { return }
                     
@@ -133,6 +136,7 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
                     }
                 }
                 
+                // 入力を直接メインミキサーに接続（リアルタイム出力）
                 audioEngine.connect(inputNode, to: audioEngine.mainMixerNode, format: inputFormat)
                 
                 try audioEngine.start()
@@ -149,19 +153,47 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     
     func stopMonitoring() {
-        guard audioEngine.isRunning else { 
-            isMonitoring = false
-            inputLevel = 0.0
-            return 
+        if audioEngine.isRunning && !isRecording {
+            if inputNode.numberOfInputs > 0 {
+                inputNode.removeTap(onBus: 0)
+            }
+            audioEngine.stop()
         }
-        
-        if inputNode.numberOfInputs > 0 {
-            inputNode.removeTap(onBus: 0)
-        }
-        audioEngine.stop()
         isMonitoring = false
         inputLevel = 0.0
         print("リアルタイムモニタリングを停止しました")
+    }
+    
+    func startRecording(to url: URL) {
+        do {
+            // 録音中でもモニタリングを継続するため、AudioEngineを停止しない
+            if !audioEngine.isRunning && isMonitoring {
+                try startMonitoring()
+            }
+            
+            let settings = [
+                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+                AVSampleRateKey: 44100,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+            ]
+            
+            audioRecorder = try AVAudioRecorder(url: url, settings: settings)
+            audioRecorder?.record()
+            isRecording = true
+            print("録音を開始しました: \(url.lastPathComponent)")
+            
+        } catch {
+            print("録音の開始に失敗しました: \(error)")
+            isRecording = false
+        }
+    }
+    
+    func stopRecording() {
+        audioRecorder?.stop()
+        audioRecorder = nil
+        isRecording = false
+        print("録音を停止しました")
     }
     
     // MARK: - AVAudioPlayerDelegate
@@ -254,8 +286,6 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
 struct ContentView: View {
     @StateObject private var audioManager = AudioManager()
     @StateObject private var locationManager = LocationManager()
-    @State private var audioRecorder: AVAudioRecorder?
-    @State private var isRecording = false
     @State private var recordingSession: AVAudioSession!
     @State private var recordings: [RecordingFile] = []
     @State private var showingMonitorToggle = true
@@ -277,23 +307,18 @@ struct ContentView: View {
                                 .font(.headline)
                             Spacer()
                             Button(action: {
-                                if isRecording {
-                                    showingRecordingAlert = true
+                                if audioManager.isMonitoring {
+                                    audioManager.stopMonitoring()
                                 } else {
-                                    if audioManager.isMonitoring {
-                                        audioManager.stopMonitoring()
-                                    } else {
-                                        audioManager.startMonitoring()
-                                    }
+                                    audioManager.startMonitoring()
                                 }
                             }) {
                                 Text(audioManager.isMonitoring ? "停止" : "開始")
                                     .foregroundColor(.white)
                                     .frame(width: 60, height: 30)
-                                    .background(audioManager.isMonitoring ? Color.red : (isRecording ? Color.gray : Color.green))
+                                    .background(audioManager.isMonitoring ? Color.red : Color.green)
                                     .cornerRadius(15)
                             }
-                            .disabled(isRecording)
                         }
                         .padding(.horizontal)
                         
@@ -310,31 +335,31 @@ struct ContentView: View {
                         }
                     }
                     
-                    Image(systemName: isRecording ? "mic.fill" : "mic")
+                    Image(systemName: audioManager.isRecording ? "mic.fill" : "mic")
                         .font(.system(size: 60))
-                        .foregroundColor(isRecording ? .red : .blue)
-                        .scaleEffect(isRecording ? 1.2 : 1.0)
-                        .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: isRecording)
+                        .foregroundColor(audioManager.isRecording ? .red : .blue)
+                        .scaleEffect(audioManager.isRecording ? 1.2 : 1.0)
+                        .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: audioManager.isRecording)
                     
                     Button(action: {
-                        if isRecording {
-                            stopRecording()
+                        if audioManager.isRecording {
+                            audioManager.stopRecording()
+                            loadRecordings()
                         } else {
-                            if audioManager.isMonitoring {
-                                audioManager.stopMonitoring()
-                            }
-                            startRecording()
+                            locationManager.requestLocation()
+                            let audioFilename = getDocumentsDirectory().appendingPathComponent("recording-\(Date().timeIntervalSince1970).m4a")
+                            audioManager.startRecording(to: audioFilename)
                         }
                     }) {
-                        Text(isRecording ? "録音停止" : "録音開始")
+                        Text(audioManager.isRecording ? "録音停止" : "録音開始")
                             .font(.title3)
                             .foregroundColor(.white)
                             .frame(width: 120, height: 40)
-                            .background(isRecording ? Color.red : Color.blue)
+                            .background(audioManager.isRecording ? Color.red : Color.blue)
                             .cornerRadius(20)
                     }
                     
-                    if isRecording {
+                    if audioManager.isRecording {
                         VStack {
                             Text("録音中...")
                                 .foregroundColor(.red)
@@ -410,11 +435,6 @@ struct ContentView: View {
             loadRecordings()
             locationManager.requestLocation()
         }
-        .alert("録音中はモニタリングを変更できません", isPresented: $showingRecordingAlert) {
-            Button("了解") { }
-        } message: {
-            Text("録音を停止してからモニタリング設定を変更してください。")
-        }
     }
     
     func setupRecordingSession() {
@@ -446,35 +466,6 @@ struct ContentView: View {
         }
     }
     
-    func startRecording() {
-        locationManager.requestLocation()
-        
-        let audioFilename = getDocumentsDirectory().appendingPathComponent("recording-\(Date().timeIntervalSince1970).m4a")
-        
-        let settings = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
-        ]
-        
-        do {
-            audioRecorder = try AVAudioRecorder(url: audioFilename, settings: settings)
-            audioRecorder?.record()
-            isRecording = true
-            print("録音を開始しました: \(audioFilename.lastPathComponent)")
-        } catch {
-            print("録音の開始に失敗しました: \(error)")
-        }
-    }
-    
-    func stopRecording() {
-        audioRecorder?.stop()
-        audioRecorder = nil
-        isRecording = false
-        print("録音を停止しました")
-        loadRecordings()
-    }
     
     func loadRecordings() {
         let documentsPath = getDocumentsDirectory()
