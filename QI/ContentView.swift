@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AVFoundation
+import Combine
 
 struct RecordingFile: Identifiable {
     let id = UUID()
