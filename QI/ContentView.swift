@@ -8,6 +8,7 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import CoreLocation
 
 struct RecordingFile: Identifiable {
     let id = UUID()
@@ -15,26 +16,48 @@ struct RecordingFile: Identifiable {
     let name: String
     let date: Date
     let duration: TimeInterval
+    let location: CLLocation?
+    let locationName: String?
 }
 
 class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var isPlaying = false
     @Published var currentPlayingId: UUID?
+    @Published var isMonitoring = false
+    @Published var inputLevel: Float = 0.0
     
     private var audioPlayer: AVAudioPlayer?
     private var recordingSession: AVAudioSession!
+    private var audioEngine: AVAudioEngine!
+    private var inputNode: AVAudioInputNode!
+    private var playerNode: AVAudioPlayerNode!
+    private var levelTimer: Timer?
     
     override init() {
         super.init()
+        setupAudioEngine()
         setupAudioSession()
+    }
+    
+    private func setupAudioEngine() {
+        audioEngine = AVAudioEngine()
+        inputNode = audioEngine.inputNode
+        playerNode = AVAudioPlayerNode()
+        
+        audioEngine.attach(playerNode)
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: nil)
     }
     
     private func setupAudioSession() {
         recordingSession = AVAudioSession.sharedInstance()
         
         do {
-            try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
             try recordingSession.setActive(true)
+            
+            if recordingSession.preferredIOBufferDuration != 0.005 {
+                try recordingSession.setPreferredIOBufferDuration(0.005)
+            }
         } catch {
             print("オーディオセッションの設定に失敗しました: \(error)")
         }
@@ -74,6 +97,52 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
         print("再生を停止しました")
     }
     
+    func startMonitoring() {
+        guard !audioEngine.isRunning else { return }
+        
+        do {
+            try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
+            try recordingSession.setActive(true)
+            
+            let inputFormat = inputNode.outputFormat(forBus: 0)
+            
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] (buffer, time) in
+                guard let self = self else { return }
+                
+                let channelData = buffer.floatChannelData?[0]
+                let channelDataValueArray = stride(from: 0, to: Int(buffer.frameLength), by: buffer.stride).map { channelData?[$0] ?? 0 }
+                let rms = sqrt(channelDataValueArray.map { $0 * $0 }.reduce(0, +) / Float(channelDataValueArray.count))
+                
+                DispatchQueue.main.async {
+                    self.inputLevel = rms
+                }
+                
+                audioEngine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { (buffer, time) in
+                }
+            }
+            
+            audioEngine.connect(inputNode, to: audioEngine.mainMixerNode, format: inputFormat)
+            
+            try audioEngine.start()
+            isMonitoring = true
+            print("リアルタイムモニタリングを開始しました")
+            
+        } catch {
+            print("モニタリングの開始に失敗しました: \(error)")
+        }
+    }
+    
+    func stopMonitoring() {
+        guard audioEngine.isRunning else { return }
+        
+        inputNode.removeTap(onBus: 0)
+        audioEngine.mainMixerNode.removeTap(onBus: 0)
+        audioEngine.stop()
+        isMonitoring = false
+        inputLevel = 0.0
+        print("リアルタイムモニタリングを停止しました")
+    }
+    
     // MARK: - AVAudioPlayerDelegate
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         DispatchQueue.main.async {
@@ -92,21 +161,127 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 }
 
+class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var location: CLLocation?
+    @Published var locationName: String?
+    @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
+    
+    private let locationManager = CLLocationManager()
+    private let geocoder = CLGeocoder()
+    
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.requestWhenInUseAuthorization()
+    }
+    
+    func requestLocation() {
+        guard authorizationStatus == .authorizedWhenInUse || authorizationStatus == .authorizedAlways else {
+            print("位置情報のアクセスが許可されていません")
+            return
+        }
+        locationManager.requestLocation()
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        self.location = location
+        
+        geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, error in
+            if let error = error {
+                print("位置情報の変換に失敗しました: \(error)")
+                return
+            }
+            
+            if let placemark = placemarks?.first {
+                DispatchQueue.main.async {
+                    self?.locationName = self?.formatLocationName(placemark)
+                }
+            }
+        }
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("位置情報の取得に失敗しました: \(error)")
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        authorizationStatus = status
+        if status == .authorizedWhenInUse || status == .authorizedAlways {
+            requestLocation()
+        }
+    }
+    
+    private func formatLocationName(_ placemark: CLPlacemark) -> String {
+        var components: [String] = []
+        
+        if let name = placemark.name {
+            components.append(name)
+        }
+        if let locality = placemark.locality {
+            components.append(locality)
+        }
+        if let administrativeArea = placemark.administrativeArea {
+            components.append(administrativeArea)
+        }
+        
+        return components.joined(separator: ", ")
+    }
+}
+
 struct ContentView: View {
     @StateObject private var audioManager = AudioManager()
+    @StateObject private var locationManager = LocationManager()
     @State private var audioRecorder: AVAudioRecorder?
     @State private var isRecording = false
     @State private var recordingSession: AVAudioSession!
     @State private var recordings: [RecordingFile] = []
+    @State private var showingMonitorToggle = true
     
     var body: some View {
         NavigationView {
             VStack(spacing: 20) {
                 // 録音セクション
                 VStack(spacing: 20) {
-                    Text("音声録音アプリ")
+                    Text("ギター録音アプリ")
                         .font(.largeTitle)
                         .fontWeight(.bold)
+                    
+                    // モニタリングコントロール
+                    if showingMonitorToggle {
+                        HStack {
+                            Text("LINE入力モニタリング")
+                                .font(.headline)
+                            Spacer()
+                            Button(action: {
+                                if audioManager.isMonitoring {
+                                    audioManager.stopMonitoring()
+                                } else {
+                                    audioManager.startMonitoring()
+                                }
+                            }) {
+                                Text(audioManager.isMonitoring ? "停止" : "開始")
+                                    .foregroundColor(.white)
+                                    .frame(width: 60, height: 30)
+                                    .background(audioManager.isMonitoring ? Color.red : Color.green)
+                                    .cornerRadius(15)
+                            }
+                        }
+                        .padding(.horizontal)
+                        
+                        // 入力レベルメーター
+                        if audioManager.isMonitoring {
+                            VStack {
+                                Text("入力レベル")
+                                    .font(.caption)
+                                ProgressView(value: audioManager.inputLevel, total: 1.0)
+                                    .progressViewStyle(LinearProgressViewStyle(tint: audioManager.inputLevel > 0.8 ? .red : .green))
+                                    .frame(height: 10)
+                            }
+                            .padding(.horizontal)
+                        }
+                    }
                     
                     Image(systemName: isRecording ? "mic.fill" : "mic")
                         .font(.system(size: 60))
@@ -130,9 +305,16 @@ struct ContentView: View {
                     }
                     
                     if isRecording {
-                        Text("録音中...")
-                            .foregroundColor(.red)
-                            .font(.headline)
+                        VStack {
+                            Text("録音中...")
+                                .foregroundColor(.red)
+                                .font(.headline)
+                            if let locationName = locationManager.locationName {
+                                Text("場所: \(locationName)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
                     }
                 }
                 .padding(.top)
@@ -196,6 +378,7 @@ struct ContentView: View {
         .onAppear {
             setupRecordingSession()
             loadRecordings()
+            locationManager.requestLocation()
         }
     }
     
@@ -219,6 +402,8 @@ struct ContentView: View {
     }
     
     func startRecording() {
+        locationManager.requestLocation()
+        
         let audioFilename = getDocumentsDirectory().appendingPathComponent("recording-\(Date().timeIntervalSince1970).m4a")
         
         let settings = [
@@ -264,7 +449,14 @@ struct ContentView: View {
                 let name = url.lastPathComponent.replacingOccurrences(of: ".m4a", with: "")
                     .replacingOccurrences(of: "recording-", with: "録音-")
                 
-                return RecordingFile(url: url, name: name, date: creationDate, duration: duration)
+                return RecordingFile(
+                    url: url, 
+                    name: name, 
+                    date: creationDate, 
+                    duration: duration,
+                    location: locationManager.location,
+                    locationName: locationManager.locationName
+                )
             }.sorted { $0.date > $1.date }
             
         } catch {
@@ -339,6 +531,18 @@ struct RecordingRow: View {
                     Text(formattedDuration)
                         .font(.caption)
                         .foregroundColor(.secondary)
+                }
+                
+                if let locationName = recording.locationName {
+                    HStack {
+                        Image(systemName: "location.fill")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text(locationName)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                 }
             }
             
