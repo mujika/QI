@@ -8,49 +8,113 @@
 import SwiftUI
 import AVFoundation
 
+struct RecordingFile: Identifiable {
+    let id = UUID()
+    let url: URL
+    let name: String
+    let date: Date
+    let duration: TimeInterval
+}
+
 struct ContentView: View {
     @State private var audioRecorder: AVAudioRecorder?
+    @State private var audioPlayer: AVAudioPlayer?
     @State private var isRecording = false
+    @State private var isPlaying = false
     @State private var recordingSession: AVAudioSession!
     @State private var alertMessage = ""
     @State private var showAlert = false
+    @State private var recordings: [RecordingFile] = []
+    @State private var currentPlayingId: UUID?
     
     var body: some View {
-        VStack(spacing: 30) {
-            Text("音声録音アプリ")
-                .font(.largeTitle)
-                .fontWeight(.bold)
-            
-            Image(systemName: isRecording ? "mic.fill" : "mic")
-                .font(.system(size: 80))
-                .foregroundColor(isRecording ? .red : .blue)
-                .scaleEffect(isRecording ? 1.2 : 1.0)
-                .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: isRecording)
-            
-            Button(action: {
-                if isRecording {
-                    stopRecording()
-                } else {
-                    startRecording()
+        NavigationView {
+            VStack(spacing: 20) {
+                // 録音セクション
+                VStack(spacing: 20) {
+                    Text("音声録音アプリ")
+                        .font(.largeTitle)
+                        .fontWeight(.bold)
+                    
+                    Image(systemName: isRecording ? "mic.fill" : "mic")
+                        .font(.system(size: 60))
+                        .foregroundColor(isRecording ? .red : .blue)
+                        .scaleEffect(isRecording ? 1.2 : 1.0)
+                        .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: isRecording)
+                    
+                    Button(action: {
+                        if isRecording {
+                            stopRecording()
+                        } else {
+                            startRecording()
+                        }
+                    }) {
+                        Text(isRecording ? "録音停止" : "録音開始")
+                            .font(.title3)
+                            .foregroundColor(.white)
+                            .frame(width: 120, height: 40)
+                            .background(isRecording ? Color.red : Color.blue)
+                            .cornerRadius(20)
+                    }
+                    
+                    if isRecording {
+                        Text("録音中...")
+                            .foregroundColor(.red)
+                            .font(.headline)
+                    }
                 }
-            }) {
-                Text(isRecording ? "録音停止" : "録音開始")
-                    .font(.title2)
-                    .foregroundColor(.white)
-                    .frame(width: 150, height: 50)
-                    .background(isRecording ? Color.red : Color.blue)
-                    .cornerRadius(25)
+                .padding(.top)
+                
+                Divider()
+                
+                // 録音リストセクション
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text("録音一覧")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        
+                        Spacer()
+                        
+                        Text("\(recordings.count)件")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal)
+                    
+                    if recordings.isEmpty {
+                        VStack {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 40))
+                                .foregroundColor(.gray)
+                            Text("録音データがありません")
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 100)
+                    } else {
+                        List {
+                            ForEach(recordings) { recording in
+                                RecordingRow(
+                                    recording: recording,
+                                    isPlaying: currentPlayingId == recording.id,
+                                    onPlay: { playRecording(recording) },
+                                    onStop: { stopPlayback() },
+                                    onDelete: { deleteRecording(recording) }
+                                )
+                            }
+                        }
+                        .listStyle(PlainListStyle())
+                    }
+                }
+                
+                Spacer()
             }
-            
-            if isRecording {
-                Text("録音中...")
-                    .foregroundColor(.red)
-                    .font(.headline)
-            }
+            .navigationTitle("")
+            .navigationBarHidden(true)
         }
-        .padding()
         .onAppear {
             setupRecordingSession()
+            loadRecordings()
         }
         .alert("メッセージ", isPresented: $showAlert) {
             Button("OK") { }
@@ -108,11 +172,139 @@ struct ContentView: View {
         isRecording = false
         alertMessage = "録音を停止しました"
         showAlert = true
+        loadRecordings()
+    }
+    
+    func loadRecordings() {
+        let documentsPath = getDocumentsDirectory()
+        
+        do {
+            let fileURLs = try FileManager.default.contentsOfDirectory(at: documentsPath, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles)
+            
+            let audioFiles = fileURLs.filter { $0.pathExtension == "m4a" }
+            
+            recordings = audioFiles.compactMap { url in
+                guard let resourceValues = try? url.resourceValues(forKeys: [.creationDateKey]),
+                      let creationDate = resourceValues.creationDate else {
+                    return nil
+                }
+                
+                let duration = getAudioDuration(url: url)
+                let name = url.lastPathComponent.replacingOccurrences(of: ".m4a", with: "")
+                    .replacingOccurrences(of: "recording-", with: "録音-")
+                
+                return RecordingFile(url: url, name: name, date: creationDate, duration: duration)
+            }.sorted { $0.date > $1.date }
+            
+        } catch {
+            print("録音ファイルの読み込みに失敗しました: \(error)")
+        }
+    }
+    
+    func getAudioDuration(url: URL) -> TimeInterval {
+        do {
+            let audioPlayer = try AVAudioPlayer(contentsOf: url)
+            return audioPlayer.duration
+        } catch {
+            return 0
+        }
+    }
+    
+    func playRecording(_ recording: RecordingFile) {
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: recording.url)
+            audioPlayer?.play()
+            currentPlayingId = recording.id
+            isPlaying = true
+        } catch {
+            alertMessage = "再生に失敗しました"
+            showAlert = true
+        }
+    }
+    
+    func stopPlayback() {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        currentPlayingId = nil
+        isPlaying = false
+    }
+    
+    func deleteRecording(_ recording: RecordingFile) {
+        do {
+            try FileManager.default.removeItem(at: recording.url)
+            loadRecordings()
+            alertMessage = "録音を削除しました"
+            showAlert = true
+        } catch {
+            alertMessage = "削除に失敗しました"
+            showAlert = true
+        }
     }
     
     func getDocumentsDirectory() -> URL {
         let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
         return paths[0]
+    }
+}
+
+struct RecordingRow: View {
+    let recording: RecordingFile
+    let isPlaying: Bool
+    let onPlay: () -> Void
+    let onStop: () -> Void
+    let onDelete: () -> Void
+    
+    private var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        formatter.locale = Locale(identifier: "ja_JP")
+        return formatter.string(from: recording.date)
+    }
+    
+    private var formattedDuration: String {
+        let minutes = Int(recording.duration) / 60
+        let seconds = Int(recording.duration) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(recording.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                
+                HStack {
+                    Text(formattedDate)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                    Text(formattedDuration)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Spacer()
+            
+            HStack(spacing: 10) {
+                Button(action: isPlaying ? onStop : onPlay) {
+                    Image(systemName: isPlaying ? "stop.fill" : "play.fill")
+                        .font(.title2)
+                        .foregroundColor(.blue)
+                }
+                
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.title3)
+                        .foregroundColor(.red)
+                }
+            }
+        }
+        .padding(.vertical, 8)
     }
 }
 
