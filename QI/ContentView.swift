@@ -116,31 +116,24 @@ struct ContentView: View {
             setupRecordingSession()
             loadRecordings()
         }
-        .alert("メッセージ", isPresented: $showAlert) {
-            Button("OK") { }
-        } message: {
-            Text(alertMessage)
-        }
     }
     
     func setupRecordingSession() {
         recordingSession = AVAudioSession.sharedInstance()
         
         do {
-            try recordingSession.setCategory(.playAndRecord, mode: .default)
+            try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
             try recordingSession.setActive(true)
             
             recordingSession.requestRecordPermission { allowed in
                 DispatchQueue.main.async {
                     if !allowed {
-                        self.alertMessage = "マイクへのアクセス許可が必要です"
-                        self.showAlert = true
+                        print("マイクへのアクセス許可が拒否されました")
                     }
                 }
             }
         } catch {
-            alertMessage = "録音セッションの設定に失敗しました"
-            showAlert = true
+            print("録音セッションの設定に失敗しました: \(error)")
         }
     }
     
@@ -149,7 +142,7 @@ struct ContentView: View {
         
         let settings = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 12000,
+            AVSampleRateKey: 44100,
             AVNumberOfChannelsKey: 1,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
         ]
@@ -158,11 +151,9 @@ struct ContentView: View {
             audioRecorder = try AVAudioRecorder(url: audioFilename, settings: settings)
             audioRecorder?.record()
             isRecording = true
-            alertMessage = "録音を開始しました"
-            showAlert = true
+            print("録音を開始しました: \(audioFilename.lastPathComponent)")
         } catch {
-            alertMessage = "録音の開始に失敗しました"
-            showAlert = true
+            print("録音の開始に失敗しました: \(error)")
         }
     }
     
@@ -170,8 +161,7 @@ struct ContentView: View {
         audioRecorder?.stop()
         audioRecorder = nil
         isRecording = false
-        alertMessage = "録音を停止しました"
-        showAlert = true
+        print("録音を停止しました")
         loadRecordings()
     }
     
@@ -211,14 +201,30 @@ struct ContentView: View {
     }
     
     func playRecording(_ recording: RecordingFile) {
+        // 現在再生中の音声があれば停止
+        stopPlayback()
+        
         do {
+            // オーディオセッションを再生用に設定
+            try recordingSession.setCategory(.playback, mode: .default, options: [])
+            try recordingSession.setActive(true)
+            
             audioPlayer = try AVAudioPlayer(contentsOf: recording.url)
-            audioPlayer?.play()
-            currentPlayingId = recording.id
-            isPlaying = true
+            audioPlayer?.delegate = self
+            audioPlayer?.prepareToPlay()
+            
+            let success = audioPlayer?.play() ?? false
+            if success {
+                currentPlayingId = recording.id
+                isPlaying = true
+                print("再生開始: \(recording.name)")
+            } else {
+                print("再生開始に失敗しました")
+            }
         } catch {
-            alertMessage = "再生に失敗しました"
-            showAlert = true
+            print("再生に失敗しました: \(error)")
+            print("ファイルパス: \(recording.url)")
+            print("ファイル存在確認: \(FileManager.default.fileExists(atPath: recording.url.path))")
         }
     }
     
@@ -227,23 +233,45 @@ struct ContentView: View {
         audioPlayer = nil
         currentPlayingId = nil
         isPlaying = false
+        print("再生を停止しました")
     }
     
     func deleteRecording(_ recording: RecordingFile) {
+        // 削除対象が再生中の場合は停止
+        if currentPlayingId == recording.id {
+            stopPlayback()
+        }
+        
         do {
             try FileManager.default.removeItem(at: recording.url)
             loadRecordings()
-            alertMessage = "録音を削除しました"
-            showAlert = true
+            print("録音を削除しました: \(recording.name)")
         } catch {
-            alertMessage = "削除に失敗しました"
-            showAlert = true
+            print("削除に失敗しました: \(error)")
         }
     }
     
     func getDocumentsDirectory() -> URL {
         let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
         return paths[0]
+    }
+}
+
+extension ContentView: AVAudioPlayerDelegate {
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async {
+            self.currentPlayingId = nil
+            self.isPlaying = false
+            print("再生が完了しました")
+        }
+    }
+    
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        DispatchQueue.main.async {
+            self.currentPlayingId = nil
+            self.isPlaying = false
+            print("再生エラー: \(error?.localizedDescription ?? "不明なエラー")")
+        }
     }
 }
 
