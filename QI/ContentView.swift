@@ -16,16 +16,87 @@ struct RecordingFile: Identifiable {
     let duration: TimeInterval
 }
 
+class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published var isPlaying = false
+    @Published var currentPlayingId: UUID?
+    
+    private var audioPlayer: AVAudioPlayer?
+    private var recordingSession: AVAudioSession!
+    
+    override init() {
+        super.init()
+        setupAudioSession()
+    }
+    
+    private func setupAudioSession() {
+        recordingSession = AVAudioSession.sharedInstance()
+        
+        do {
+            try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            try recordingSession.setActive(true)
+        } catch {
+            print("オーディオセッションの設定に失敗しました: \(error)")
+        }
+    }
+    
+    func playRecording(_ recording: RecordingFile) {
+        stopPlayback()
+        
+        do {
+            try recordingSession.setCategory(.playback, mode: .default, options: [])
+            try recordingSession.setActive(true)
+            
+            audioPlayer = try AVAudioPlayer(contentsOf: recording.url)
+            audioPlayer?.delegate = self
+            audioPlayer?.prepareToPlay()
+            
+            let success = audioPlayer?.play() ?? false
+            if success {
+                currentPlayingId = recording.id
+                isPlaying = true
+                print("再生開始: \(recording.name)")
+            } else {
+                print("再生開始に失敗しました")
+            }
+        } catch {
+            print("再生に失敗しました: \(error)")
+            print("ファイルパス: \(recording.url)")
+            print("ファイル存在確認: \(FileManager.default.fileExists(atPath: recording.url.path))")
+        }
+    }
+    
+    func stopPlayback() {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        currentPlayingId = nil
+        isPlaying = false
+        print("再生を停止しました")
+    }
+    
+    // MARK: - AVAudioPlayerDelegate
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async {
+            self.currentPlayingId = nil
+            self.isPlaying = false
+            print("再生が完了しました")
+        }
+    }
+    
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        DispatchQueue.main.async {
+            self.currentPlayingId = nil
+            self.isPlaying = false
+            print("再生エラー: \(error?.localizedDescription ?? "不明なエラー")")
+        }
+    }
+}
+
 struct ContentView: View {
+    @StateObject private var audioManager = AudioManager()
     @State private var audioRecorder: AVAudioRecorder?
-    @State private var audioPlayer: AVAudioPlayer?
     @State private var isRecording = false
-    @State private var isPlaying = false
     @State private var recordingSession: AVAudioSession!
-    @State private var alertMessage = ""
-    @State private var showAlert = false
     @State private var recordings: [RecordingFile] = []
-    @State private var currentPlayingId: UUID?
     
     var body: some View {
         NavigationView {
@@ -96,9 +167,9 @@ struct ContentView: View {
                             ForEach(recordings) { recording in
                                 RecordingRow(
                                     recording: recording,
-                                    isPlaying: currentPlayingId == recording.id,
-                                    onPlay: { playRecording(recording) },
-                                    onStop: { stopPlayback() },
+                                    isPlaying: audioManager.currentPlayingId == recording.id,
+                                    onPlay: { audioManager.playRecording(recording) },
+                                    onStop: { audioManager.stopPlayback() },
                                     onDelete: { deleteRecording(recording) }
                                 )
                             }
@@ -200,46 +271,11 @@ struct ContentView: View {
         }
     }
     
-    func playRecording(_ recording: RecordingFile) {
-        // 現在再生中の音声があれば停止
-        stopPlayback()
-        
-        do {
-            // オーディオセッションを再生用に設定
-            try recordingSession.setCategory(.playback, mode: .default, options: [])
-            try recordingSession.setActive(true)
-            
-            audioPlayer = try AVAudioPlayer(contentsOf: recording.url)
-            audioPlayer?.delegate = self
-            audioPlayer?.prepareToPlay()
-            
-            let success = audioPlayer?.play() ?? false
-            if success {
-                currentPlayingId = recording.id
-                isPlaying = true
-                print("再生開始: \(recording.name)")
-            } else {
-                print("再生開始に失敗しました")
-            }
-        } catch {
-            print("再生に失敗しました: \(error)")
-            print("ファイルパス: \(recording.url)")
-            print("ファイル存在確認: \(FileManager.default.fileExists(atPath: recording.url.path))")
-        }
-    }
-    
-    func stopPlayback() {
-        audioPlayer?.stop()
-        audioPlayer = nil
-        currentPlayingId = nil
-        isPlaying = false
-        print("再生を停止しました")
-    }
     
     func deleteRecording(_ recording: RecordingFile) {
         // 削除対象が再生中の場合は停止
-        if currentPlayingId == recording.id {
-            stopPlayback()
+        if audioManager.currentPlayingId == recording.id {
+            audioManager.stopPlayback()
         }
         
         do {
@@ -254,24 +290,6 @@ struct ContentView: View {
     func getDocumentsDirectory() -> URL {
         let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
         return paths[0]
-    }
-}
-
-extension ContentView: AVAudioPlayerDelegate {
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async {
-            self.currentPlayingId = nil
-            self.isPlaying = false
-            print("再生が完了しました")
-        }
-    }
-    
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        DispatchQueue.main.async {
-            self.currentPlayingId = nil
-            self.isPlaying = false
-            print("再生エラー: \(error?.localizedDescription ?? "不明なエラー")")
-        }
     }
 }
 
