@@ -98,45 +98,66 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     
     func startMonitoring() {
-        guard !audioEngine.isRunning else { return }
+        guard !audioEngine.isRunning else { 
+            print("AudioEngine already running")
+            return 
+        }
         
         do {
+            audioEngine.stop()
+            audioEngine.reset()
+            
             try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
             try recordingSession.setActive(true)
             
             let inputFormat = inputNode.outputFormat(forBus: 0)
+            print("Input format: \(inputFormat)")
             
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] (buffer, time) in
-                guard let self = self else { return }
-                
-                let channelData = buffer.floatChannelData?[0]
-                let channelDataValueArray = stride(from: 0, to: Int(buffer.frameLength), by: buffer.stride).map { channelData?[$0] ?? 0 }
-                let rms = sqrt(channelDataValueArray.map { $0 * $0 }.reduce(0, +) / Float(channelDataValueArray.count))
-                
-                DispatchQueue.main.async {
-                    self.inputLevel = rms
+            if inputNode.numberOfInputs > 0 {
+                inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] (buffer, time) in
+                    guard let self = self else { return }
+                    
+                    let channelData = buffer.floatChannelData?[0]
+                    let frameLength = Int(buffer.frameLength)
+                    guard frameLength > 0, let data = channelData else { return }
+                    
+                    var sum: Float = 0
+                    for i in 0..<frameLength {
+                        let sample = data[i]
+                        sum += sample * sample
+                    }
+                    let rms = sqrt(sum / Float(frameLength))
+                    
+                    DispatchQueue.main.async {
+                        self.inputLevel = min(rms * 10, 1.0)
+                    }
                 }
                 
-                audioEngine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { (buffer, time) in
-                }
+                audioEngine.connect(inputNode, to: audioEngine.mainMixerNode, format: inputFormat)
+                
+                try audioEngine.start()
+                isMonitoring = true
+                print("リアルタイムモニタリングを開始しました")
+            } else {
+                print("入力デバイスが見つかりません")
             }
-            
-            audioEngine.connect(inputNode, to: audioEngine.mainMixerNode, format: inputFormat)
-            
-            try audioEngine.start()
-            isMonitoring = true
-            print("リアルタイムモニタリングを開始しました")
             
         } catch {
             print("モニタリングの開始に失敗しました: \(error)")
+            isMonitoring = false
         }
     }
     
     func stopMonitoring() {
-        guard audioEngine.isRunning else { return }
+        guard audioEngine.isRunning else { 
+            isMonitoring = false
+            inputLevel = 0.0
+            return 
+        }
         
-        inputNode.removeTap(onBus: 0)
-        audioEngine.mainMixerNode.removeTap(onBus: 0)
+        if inputNode.numberOfInputs > 0 {
+            inputNode.removeTap(onBus: 0)
+        }
         audioEngine.stop()
         isMonitoring = false
         inputLevel = 0.0
@@ -238,6 +259,7 @@ struct ContentView: View {
     @State private var recordingSession: AVAudioSession!
     @State private var recordings: [RecordingFile] = []
     @State private var showingMonitorToggle = true
+    @State private var showingRecordingAlert = false
     
     var body: some View {
         NavigationView {
@@ -255,18 +277,23 @@ struct ContentView: View {
                                 .font(.headline)
                             Spacer()
                             Button(action: {
-                                if audioManager.isMonitoring {
-                                    audioManager.stopMonitoring()
+                                if isRecording {
+                                    showingRecordingAlert = true
                                 } else {
-                                    audioManager.startMonitoring()
+                                    if audioManager.isMonitoring {
+                                        audioManager.stopMonitoring()
+                                    } else {
+                                        audioManager.startMonitoring()
+                                    }
                                 }
                             }) {
                                 Text(audioManager.isMonitoring ? "停止" : "開始")
                                     .foregroundColor(.white)
                                     .frame(width: 60, height: 30)
-                                    .background(audioManager.isMonitoring ? Color.red : Color.green)
+                                    .background(audioManager.isMonitoring ? Color.red : (isRecording ? Color.gray : Color.green))
                                     .cornerRadius(15)
                             }
+                            .disabled(isRecording)
                         }
                         .padding(.horizontal)
                         
@@ -293,6 +320,9 @@ struct ContentView: View {
                         if isRecording {
                             stopRecording()
                         } else {
+                            if audioManager.isMonitoring {
+                                audioManager.stopMonitoring()
+                            }
                             startRecording()
                         }
                     }) {
@@ -380,6 +410,11 @@ struct ContentView: View {
             loadRecordings()
             locationManager.requestLocation()
         }
+        .alert("録音中はモニタリングを変更できません", isPresented: $showingRecordingAlert) {
+            Button("了解") { }
+        } message: {
+            Text("録音を停止してからモニタリング設定を変更してください。")
+        }
     }
     
     func setupRecordingSession() {
@@ -389,10 +424,20 @@ struct ContentView: View {
             try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
             try recordingSession.setActive(true)
             
-            recordingSession.requestRecordPermission { allowed in
-                DispatchQueue.main.async {
-                    if !allowed {
-                        print("マイクへのアクセス許可が拒否されました")
+            if #available(iOS 17.0, *) {
+                AVAudioApplication.requestRecordPermission { allowed in
+                    DispatchQueue.main.async {
+                        if !allowed {
+                            print("マイクへのアクセス許可が拒否されました")
+                        }
+                    }
+                }
+            } else {
+                recordingSession.requestRecordPermission { allowed in
+                    DispatchQueue.main.async {
+                        if !allowed {
+                            print("マイクへのアクセス許可が拒否されました")
+                        }
                     }
                 }
             }
