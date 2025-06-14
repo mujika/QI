@@ -9,6 +9,7 @@ import SwiftUI
 import AVFoundation
 import Combine
 import CoreLocation
+import PhotosUI
 
 struct RecordingFile: Identifiable {
     let id = UUID()
@@ -290,10 +291,19 @@ struct ContentView: View {
     @State private var recordings: [RecordingFile] = []
     @State private var showingMonitorToggle = true
     @State private var showingRecordingAlert = false
+    @State private var wallpaperImage: Image?
+    @State private var wallpaperItem: PhotosPickerItem?
     
     var body: some View {
         NavigationView {
-            VStack(spacing: 20) {
+            ZStack {
+                if let wallpaperImage = wallpaperImage {
+                    wallpaperImage
+                        .resizable()
+                        .scaledToFill()
+                        .ignoresSafeArea()
+                }
+                VStack(spacing: 20) {
                 // 録音セクション
                 VStack(spacing: 20) {
                     Text("ギター録音アプリ")
@@ -425,6 +435,23 @@ struct ContentView: View {
                     }
                 }
                 
+                PhotosPicker(selection: $wallpaperItem, matching: .images, photoLibrary: .shared()) {
+                    Text("壁紙を選択")
+                        .foregroundColor(.blue)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 16)
+                        .background(Color.white.opacity(0.8))
+                        .cornerRadius(10)
+                }
+                .onChange(of: wallpaperItem) { newItem in
+                    Task {
+                        if let data = try? await newItem?.loadTransferable(type: Data.self),
+                           let uiImage = UIImage(data: data) {
+                            wallpaperImage = Image(uiImage: uiImage)
+                        }
+                    }
+                }
+
                 Spacer()
             }
             .navigationTitle("")
