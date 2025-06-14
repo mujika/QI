@@ -7,7 +7,6 @@
 
 import SwiftUI
 import AVFoundation
-import Combine
 import CoreLocation
 import PhotosUI
 
@@ -29,11 +28,9 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var isRecording = false
     
     private var audioPlayer: AVAudioPlayer?
-    private var recordingSession: AVAudioSession!
+    private let recordingSession = AVAudioSession.sharedInstance()
     private var audioEngine: AVAudioEngine!
     private var inputNode: AVAudioInputNode!
-    private var playerNode: AVAudioPlayerNode!
-    private var levelTimer: Timer?
     private var audioRecorder: AVAudioRecorder?
     
     override init() {
@@ -45,15 +42,9 @@ class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func setupAudioEngine() {
         audioEngine = AVAudioEngine()
         inputNode = audioEngine.inputNode
-        playerNode = AVAudioPlayerNode()
-        
-        audioEngine.attach(playerNode)
-        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: nil)
     }
     
     private func setupAudioSession() {
-        recordingSession = AVAudioSession.sharedInstance()
-        
         do {
             try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
             try recordingSession.setActive(true)
@@ -287,7 +278,7 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
 struct ContentView: View {
     @StateObject private var audioManager = AudioManager()
     @StateObject private var locationManager = LocationManager()
-    @State private var recordingSession: AVAudioSession!
+    @State private var recordingSession = AVAudioSession.sharedInstance()
     @State private var recordings: [RecordingFile] = []
     @State private var showingMonitorToggle = true
     @State private var showingRecordingAlert = false
@@ -465,8 +456,6 @@ struct ContentView: View {
     }
     
     func setupRecordingSession() {
-        recordingSession = AVAudioSession.sharedInstance()
-        
         do {
             try recordingSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
             try recordingSession.setActive(true)
@@ -498,29 +487,35 @@ struct ContentView: View {
         let documentsPath = getDocumentsDirectory()
         
         do {
-            let fileURLs = try FileManager.default.contentsOfDirectory(at: documentsPath, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles)
-            
+            let fileURLs = try FileManager.default.contentsOfDirectory(
+                at: documentsPath,
+                includingPropertiesForKeys: [.creationDateKey],
+                options: .skipsHiddenFiles
+            )
+
             let audioFiles = fileURLs.filter { $0.pathExtension == "m4a" }
             
             recordings = audioFiles.compactMap { url in
-                guard let resourceValues = try? url.resourceValues(forKeys: [.creationDateKey]),
-                      let creationDate = resourceValues.creationDate else {
-                    return nil
-                }
-                
+                guard
+                    let resourceValues = try? url.resourceValues(forKeys: [.creationDateKey]),
+                    let creationDate = resourceValues.creationDate
+                else { return nil }
+
                 let duration = getAudioDuration(url: url)
-                let name = url.lastPathComponent.replacingOccurrences(of: ".m4a", with: "")
+                let name = url.lastPathComponent
+                    .replacingOccurrences(of: ".m4a", with: "")
                     .replacingOccurrences(of: "recording-", with: "録音-")
-                
+
                 return RecordingFile(
-                    url: url, 
-                    name: name, 
-                    date: creationDate, 
+                    url: url,
+                    name: name,
+                    date: creationDate,
                     duration: duration,
                     location: locationManager.location,
                     locationName: locationManager.locationName
                 )
-            }.sorted { $0.date > $1.date }
+            }
+            .sorted { $0.date > $1.date }
             
         } catch {
             print("録音ファイルの読み込みに失敗しました: \(error)")
@@ -562,13 +557,17 @@ struct RecordingRow: View {
     let recording: RecordingFile
     let isPlaying: Bool
     let onTap: () -> Void
-    
-    private var formattedDate: String {
+
+    private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         formatter.locale = Locale(identifier: "ja_JP")
-        return formatter.string(from: recording.date)
+        return formatter
+    }()
+
+    private var formattedDate: String {
+        Self.dateFormatter.string(from: recording.date)
     }
     
     private var formattedDuration: String {
